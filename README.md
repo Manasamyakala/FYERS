@@ -1,7 +1,5 @@
 #  AI/ML-Based Stock Market Screening and Analysis System
 
-![Project Banner](assets/images/dashboard.png)
-
 ##  Overview
 
 The **AI/ML-Based Stock Market Screening and Analysis System** is a real-time Python application designed to screen NSE-listed stocks, analyze live market conditions, calculate technical indicators, and use Machine Learning to evaluate the reliability of SMMA crossover signals.
@@ -9,6 +7,8 @@ The **AI/ML-Based Stock Market Screening and Analysis System** is a real-time Py
 The system continuously streams live market data using the **Fyers API v3**, filters stocks based on liquidity and price conditions, computes technical indicators on a **1-minute timeframe**, and applies an AI/ML model to predict whether a detected Buy or Sell crossover is likely to succeed or fail.
 
 Unlike traditional screeners that simply generate crossover signals, this application attempts to identify **false signals**, estimate the **probability of success**, and provide an explanation for why a particular trade should be avoided.
+
+![Project Banner](assets/images/dashboard.png)
 
 ---
 
