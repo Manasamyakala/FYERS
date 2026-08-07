@@ -7,6 +7,7 @@ import random
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Callable, Optional, Tuple, Any
+from collections import deque
 import numpy as np
 import pandas as pd
 
@@ -86,6 +87,9 @@ class DataFeed:
         
         # Executed volume tracking: symbol -> list of (timestamp, qty)
         self.trade_history: Dict[str, List[Tuple[float, int]]] = {}
+        
+        # Raw tick history for LTQ burst features: symbol -> deque of (timestamp, price, qty, bid, ask, trade_side)
+        self.tick_history: Dict[str, deque] = {}
 
     def register_tick_callback(self, cb: Callable[[TickData], None]):
         self.tick_callbacks.append(cb)
@@ -116,6 +120,105 @@ class DataFeed:
     def get_historical_candles(self, symbol: str) -> List[Candle]:
         with self.lock:
             return list(self.candles.get(symbol, []))
+
+    def record_tick(self, symbol: str, timestamp: float, price: float, qty: int, bid: float, ask: float):
+        """Records a raw tick, classifies its trade side (buyer vs seller initiated), and updates history."""
+        with self.lock:
+            if symbol not in self.tick_history:
+                self.tick_history[symbol] = deque()
+            
+            queue = self.tick_history[symbol]
+            
+            # Determine previous tick parameters for the Tick Rule fallback
+            prev_price = None
+            prev_side = 1
+            if queue:
+                prev_price = queue[-1][1]
+                prev_side = queue[-1][5]
+                
+            # Classify Trade Side:
+            # - Trade price >= Prevailing Ask Price: Buyer-initiated (1)
+            # - Trade price <= Prevailing Bid Price: Seller-initiated (-1)
+            # - Tick Rule fallback:
+            #   - price > prev_price: Buyer-initiated (1)
+            #   - price < prev_price: Seller-initiated (-1)
+            #   - price == prev_price: Same as previous tag
+            if ask > 0 and price >= ask:
+                side = 1
+            elif bid > 0 and price <= bid:
+                side = -1
+            elif prev_price is not None:
+                if price > prev_price:
+                    side = 1
+                elif price < prev_price:
+                    side = -1
+                else:
+                    side = prev_side
+            else:
+                side = 1  # Default to buy side
+                
+            queue.append((timestamp, price, qty, bid, ask, side))
+            
+            # Prune ticks older than 5 minutes (300 seconds)
+            cutoff = timestamp - 300
+            while queue and queue[0][0] < cutoff:
+                queue.popleft()
+                
+            # Append raw tick details to CSV file (Deliverable #1)
+            try:
+                import os
+                log_file = "tick_data_log.csv"
+                write_header = not os.path.exists(log_file)
+                with open(log_file, "a") as f:
+                    if write_header:
+                        f.write("timestamp,symbol,ltp,ltq,bid,ask,side\n")
+                    f.write(f"{timestamp},{symbol},{price},{qty},{bid},{ask},{side}\n")
+            except Exception as e:
+                print(f"Error writing tick log: {e}")
+
+    def get_ltq_metrics(self, symbol: str) -> Tuple[float, float, float, float, int]:
+        """
+        Calculates LTQ burst metrics at the current instant:
+        Returns (A2, A5, ratio, side_share, max_ltq).
+        - A2: average LTQ over trailing 2 minutes (120s)
+        - A5: average LTQ over trailing 5 minutes (300s)
+        - ratio: A2 / A5
+        - side_share: Buyer-initiated share of last-2-min LTQ (0.0 to 1.0)
+        - max_ltq: Largest single trade tick size in the last 5 minutes
+        """
+        with self.lock:
+            queue = self.tick_history.get(symbol)
+            if not queue or len(queue) == 0:
+                return (0.0, 0.0, 1.0, 0.5, 0)
+                
+            now = time.time()
+            cutoff_5m = now - 300
+            cutoff_2m = now - 120
+            
+            t5_ticks = [t for t in queue if t[0] >= cutoff_5m]
+            t2_ticks = [t for t in queue if t[0] >= cutoff_2m]
+            
+            # A5: Trailing 5 mins average LTQ
+            if t5_ticks:
+                a5 = float(np.mean([t[2] for t in t5_ticks]))
+                max_ltq = int(np.max([t[2] for t in t5_ticks]))
+            else:
+                a5 = 0.0
+                max_ltq = 0
+                
+            # A2: Trailing 2 mins average LTQ
+            if t2_ticks:
+                a2 = float(np.mean([t[2] for t in t2_ticks]))
+                total_ltq_2m = sum(t[2] for t in t2_ticks)
+                buyer_ltq_2m = sum(t[2] for t in t2_ticks if t[5] == 1)
+                
+                buyer_share = float(buyer_ltq_2m / total_ltq_2m) if total_ltq_2m > 0 else 0.5
+            else:
+                a2 = 0.0
+                buyer_share = 0.5
+                
+            ratio = float(a2 / a5) if a5 > 0 else 1.0
+            return (a2, a5, ratio, buyer_share, max_ltq)
 
     def record_trade(self, symbol: str, timestamp: float, qty: int):
         """Records a trade execution to calculate rolling execution volume."""
@@ -215,7 +318,6 @@ class SimulatorFeed(DataFeed):
                 candles_list.append(candle)
                 
                 # Pre-populate trade history for rolling quantity aggregations
-                # Put a historical block trade representing this minute
                 self.record_trade(symbol, candle_time, c_volume)
                 
                 current_price = c_close
@@ -229,13 +331,23 @@ class SimulatorFeed(DataFeed):
             tick.update_from_tick(current_price, int(c_volume / 60), c_volume * 10, now)
             tick.update_from_depth(bids, asks, tot_bid, tot_ask)
             self.ticks[symbol] = tick
+            
+            # Pre-generate ticks for the last 300 seconds to fill tick_history and get immediate LTQ averages
+            t_now = now
+            t_price = current_price
+            for t_offset in range(300, 0, -3):  # every 3 seconds
+                t_time = t_now - t_offset
+                t_change = t_price * random.normalvariate(0, 0.0003)
+                t_price = round(t_price + t_change, 2)
+                t_qty = int(max(1, abs(random.normalvariate(5000 if is_liquid else 100, 2000 if is_liquid else 50))))
+                t_spread = 0.05 if t_price < 100 else (0.10 if t_price < 500 else 0.50)
+                t_bid = round(t_price - t_spread, 2)
+                t_ask = round(t_price + t_spread, 2)
+                self.record_tick(symbol, t_time, t_price, t_qty, t_bid, t_ask)
 
     def _generate_depth_profile(self, symbol: str, price: float, is_liquid: bool) -> Tuple[int, int, List[Tuple[float, int]], List[Tuple[float, int]]]:
         """Generates realistic bid/ask order book depth."""
-        # Liquidity quantities: liquid stocks cross the 10,00,000 threshold
-        # We fluctuate it so it goes slightly below and above 10L, showing the filter in action
         if is_liquid:
-            # Let YESBANK fluctuate near boundary
             if "YESBANK" in symbol:
                 tot_bid = int(random.uniform(900000, 1400000))
                 tot_ask = int(random.uniform(920000, 1380000))
@@ -248,18 +360,14 @@ class SimulatorFeed(DataFeed):
             
         spread = 0.05 if price < 100 else (0.10 if price < 500 else 0.50)
         
-        # 5-level depth
         bids = []
         asks = []
-        
         bid_rem = tot_bid
         ask_rem = tot_ask
         
         for k in range(5):
             bp = round(price - spread - (k * spread), 2)
             ap = round(price + spread + (k * spread), 2)
-            
-            # Distribute volume: 40% at level 1, decreasing outwards
             if k == 4:
                 bq = bid_rem
                 aq = ask_rem
@@ -291,8 +399,6 @@ class SimulatorFeed(DataFeed):
             prev_price = tick.ltp
             change = prev_price * random.normalvariate(0, 0.0008)
             new_price = round(prev_price + change, 2)
-            
-            # Prevent prices going negative
             if new_price <= 1.0:
                 new_price = 1.0
                 
@@ -313,6 +419,7 @@ class SimulatorFeed(DataFeed):
             
             # Record execution in history
             self.record_trade(symbol, now, trade_qty)
+            self.record_tick(symbol, now, new_price, trade_qty, tick.bid_price, tick.ask_price)
             
             # Update 1-minute candle aggregation
             self._update_candle_aggregation(symbol, new_price, trade_qty, now)
@@ -454,6 +561,20 @@ class FyersFeed(DataFeed):
             tot_bid, tot_ask, bids, asks = self._generate_depth_profile(symbol, current_price, is_liquid)
             tick.update_from_tick(current_price, int(c_volume / 60), c_volume * 10, now)
             tick.update_from_depth(bids, asks, tot_bid, tot_ask)
+            self.ticks[symbol] = tick
+            
+            # Pre-generate ticks for the last 300 seconds to fill tick_history and get immediate LTQ averages
+            t_now = now
+            t_price = current_price
+            for t_offset in range(300, 0, -3):  # every 3 seconds
+                t_time = t_now - t_offset
+                t_change = t_price * random.normalvariate(0, 0.0003)
+                t_price = round(t_price + t_change, 2)
+                t_qty = int(max(1, abs(random.normalvariate(5000 if is_liquid else 100, 2000 if is_liquid else 50))))
+                t_spread = 0.05 if t_price < 100 else (0.10 if t_price < 500 else 0.50)
+                t_bid = round(t_price - t_spread, 2)
+                t_ask = round(t_price + t_spread, 2)
+                self.record_tick(symbol, t_time, t_price, t_qty, t_bid, t_ask)
             
         # Add liquid ones to active screened symbols automatically for demo
         demo_liquid_symbols = [s for s in self.screened_symbols if s in [
@@ -525,6 +646,7 @@ class FyersFeed(DataFeed):
             tick.update_from_depth(bids, asks, tot_bid, tot_ask)
             
             self.record_trade(symbol, now, trade_qty)
+            self.record_tick(symbol, now, new_price, trade_qty, tick.bid_price, tick.ask_price)
             
             # Dynamic liquidity check
             passed_liquidity = (tot_bid >= config.LIQUIDITY_MIN_QTY) and (tot_ask >= config.LIQUIDITY_MIN_QTY)
@@ -685,6 +807,7 @@ class FyersFeed(DataFeed):
             if ltp is not None:
                 tick.update_from_tick(ltp, last_qty, vol, now)
                 self.record_trade(symbol, now, last_qty)
+                self.record_tick(symbol, now, ltp, last_qty, tick.bid_price, tick.ask_price)
                 
                 # Check price range filter dynamically (in case price shifts)
                 if not (config.PRICE_MIN <= ltp <= config.PRICE_MAX):

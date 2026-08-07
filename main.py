@@ -1,7 +1,3 @@
-# main.py
-# The main application entry point and data coordinator.
-# Orchestrates CustomTkinter UI rendering, background threads, indicators, and ML predictions.
-
 import os
 import json
 import time
@@ -18,7 +14,6 @@ from simulator import TickData, Candle, SimulatorFeed, FyersFeed
 from ml_model import CrossoverPredictor
 from ui_components import RealTimeTable, CanvasChart, MarketDepthPanel, MLDiagnosticsPanel
 
-# Set appearance mode and color theme
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -46,30 +41,30 @@ class StockAnalyzerApp(ctk.CTk):
         
         self.lock = threading.Lock()
         
-        # Build layout
+       
         self._build_ui()
         
-        # Start initial Simulator Feed
+      
         self._start_feed()
         
-        # Register window closing handler
+    
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         
-        # Start GUI Refresh Loop
+       
         self.after(200, self._refresh_loop)
 
     def _build_ui(self):
         """Builds the main dashboard panels."""
-        self.grid_columnconfigure(0, weight=3)  # Main Table & Chart column
-        self.grid_columnconfigure(1, weight=1)  # Depth & ML sidebar column
-        self.grid_rowconfigure(0, weight=0)     # Controls row
-        self.grid_rowconfigure(1, weight=1)     # Workspace row
+        self.grid_columnconfigure(0, weight=3)  
+        self.grid_columnconfigure(1, weight=1)  
+        self.grid_rowconfigure(0, weight=0)    
+        self.grid_rowconfigure(1, weight=1)     
         
-        # 1. Top Control Bar (Feed Select & Connection setup)
+       
         self.ctrl_bar = ctk.CTkFrame(self, fg_color=config.BG_CARD, height=60, corner_radius=0)
         self.ctrl_bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
         
-        # Title Brand
+   
         self.lbl_brand = ctk.CTkLabel(
             self.ctrl_bar, text="TRADING SYSTEMS", 
             font=ctk.CTkFont(family=config.FONT_FAMILY, size=15, weight="bold"),
@@ -77,7 +72,7 @@ class StockAnalyzerApp(ctk.CTk):
         )
         self.lbl_brand.pack(side="left", padx=20)
         
-        # Mode selector
+   
         self.lbl_mode = ctk.CTkLabel(self.ctrl_bar, text="Mode:", font=(config.FONT_FAMILY, 11, "bold"))
         self.lbl_mode.pack(side="left", padx=(10, 5))
         
@@ -102,28 +97,24 @@ class StockAnalyzerApp(ctk.CTk):
         )
         self.status_text.pack(side="left", padx=5)
 
-        # 2. Main Workspace Splitter (Left vs Right)
         self.left_panel = ctk.CTkFrame(self, fg_color="transparent")
         self.left_panel.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         self.left_panel.grid_columnconfigure(0, weight=1)
-        self.left_panel.grid_rowconfigure(0, weight=1)  # Table takes top
-        self.left_panel.grid_rowconfigure(1, weight=1)  # Chart takes bottom
+        self.left_panel.grid_rowconfigure(0, weight=1)  
+        self.left_panel.grid_rowconfigure(1, weight=1)  
         
         self.right_panel = ctk.CTkFrame(self, fg_color="transparent")
         self.right_panel.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         self.right_panel.grid_columnconfigure(0, weight=1)
-        self.right_panel.grid_rowconfigure(0, weight=1)  # Depth takes top
-        self.right_panel.grid_rowconfigure(1, weight=1)  # Diagnostics takes bottom
+        self.right_panel.grid_rowconfigure(0, weight=1)  
+        self.right_panel.grid_rowconfigure(1, weight=1)  
         
-        # 3. Real-Time Table (Left Top)
         self.table = RealTimeTable(self.left_panel, on_row_select_callback=self.selected_symbol)
         self.table.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
         
-        # 4. Canvas Candlestick Chart (Left Bottom)
         self.chart = CanvasChart(self.left_panel)
         self.chart.grid(row=1, column=0, sticky="nsew", padx=2, pady=2)
         
-        # 5. Market Depth Panel (Right Top)
         self.depth_panel = MarketDepthPanel(self.right_panel)
         self.depth_panel.grid(row=0, column=0, sticky="nsew", padx=2, pady=2)
         
@@ -332,6 +323,77 @@ class StockAnalyzerApp(ctk.CTk):
         
         self.active_symbols = liquid_sim_symbols
         self.table.rebuild_rows(liquid_sim_symbols)
+        
+        # Pre-populate dashboard with historical trade data
+        self._prepopulate_historical_crossovers()
+
+    def _prepopulate_historical_crossovers(self):
+        """Simulates historical crossovers over the pregenerated candles to populate the dashboard immediately at startup."""
+        import random
+        # Temporarily disable real-time CSV file logging during backtest pre-population
+        original_log_to_csv = self.predictor.log_trade_to_csv
+        original_save_csv = self.predictor.save_backtest_report_csv
+        
+        self.predictor.log_trade_to_csv = lambda trade, portfolio: None
+        self.predictor.save_backtest_report_csv = lambda: None
+        
+        for symbol in self.active_symbols:
+            history = self.feed.get_historical_candles(symbol)
+            if len(history) < 125:
+                continue
+                
+            closes = [c.close for c in history]
+            smma20_arr = indicators.calculate_smma(closes, config.SMMA_FAST_PERIOD)
+            smma120_arr = indicators.calculate_smma(closes, config.SMMA_SLOW_PERIOD)
+            
+            for idx in range(125, len(history)):
+                p_20 = smma20_arr[idx - 1]
+                p_120 = smma120_arr[idx - 1]
+                c_20 = smma20_arr[idx]
+                c_120 = smma120_arr[idx]
+                
+                if np.isnan(p_20) or np.isnan(p_120) or np.isnan(c_20) or np.isnan(c_120):
+                    continue
+                    
+                signal = "NONE"
+                if p_20 <= p_120 and c_20 > c_120:
+                    signal = "BUY"
+                elif p_20 >= p_120 and c_20 < c_120:
+                    signal = "SELL"
+                    
+                if signal != "NONE":
+                    candle = history[idx]
+                    # Simulate realistic feature metrics for backtested trades
+                    ratio_val = random.uniform(0.7, 2.2)
+                    side_share_val = random.uniform(0.55, 0.85) if signal == "BUY" else random.uniform(0.15, 0.45)
+                    
+                    features = {
+                        "A2": 1500.0 * ratio_val,
+                        "A5": 1500.0,
+                        "ratio": ratio_val,
+                        "side_share": side_share_val,
+                        "max_ltq": 5000.0 if ratio_val > 1.5 else 1500.0,
+                        "slope_gap": abs(c_20 - c_120) / candle.close * 100.0,
+                        "time_of_day": (candle.timestamp - history[0].timestamp) / 60.0
+                    }
+                    
+                    decision, prob, reason = self.predictor.handle_crossover(
+                        symbol=symbol,
+                        signal_type=signal,
+                        price=candle.close,
+                        timestamp=candle.timestamp,
+                        features=features
+                    )
+                    
+                    # Log the historical crossover details into the logs tab
+                    self.ml_panel.log_crossover(symbol, signal, candle.close, features, decision, prob, reason)
+                    
+        # Restore CSV logging functionality
+        self.predictor.log_trade_to_csv = original_log_to_csv
+        self.predictor.save_backtest_report_csv = original_save_csv
+        
+        # Initial refresh of diagnostics
+        self.ml_panel.refresh_diagnostics()
 
     def _on_tick(self, tick: TickData):
         """Processes real-time ticks to perform indicator updates and UI updates."""
@@ -380,6 +442,9 @@ class StockAnalyzerApp(ctk.CTk):
         avg_20m = self.feed.get_average_ltp(tick.symbol, 20)
         avg_60m = self.feed.get_average_ltp(tick.symbol, 60)
         
+        # Get LTQ Metrics
+        a2, a5, ratio, side_share, max_ltq = self.feed.get_ltq_metrics(tick.symbol)
+        
         # Get crossover signal and AI recommendation if cached
         pred_cache = self.latest_predictions.get(tick.symbol, {})
         
@@ -397,6 +462,11 @@ class StockAnalyzerApp(ctk.CTk):
             "vol_60m": vol_60m,
             "avg_price_20m": avg_20m,
             "avg_price_60m": avg_60m,
+            "ltq": tick.last_traded_qty,
+            "a2": a2,
+            "a5": a5,
+            "ratio": ratio,
+            "side_share": side_share,
             "signal": pred_cache.get("signal", "NONE"),
             "ml_rec": pred_cache.get("rec", "NONE"),
             "ml_conf": pred_cache.get("conf", 0.0)
@@ -443,9 +513,9 @@ class StockAnalyzerApp(ctk.CTk):
             # Crossover Detected! Invoke AI/ML analyzer
             tick = self.latest_ticks.get(symbol)
             if tick:
-                features = self.predictor.extract_features(symbol, signal, history, tick)
+                features = self.predictor.extract_features(symbol, signal, history, tick, self.feed)
                 if features:
-                    decision, prob, reason = self.predictor.predict(features, signal)
+                    decision, prob, reason = self.predictor.handle_crossover(symbol, signal, tick.ltp, time.time(), features)
                     
                     with self.lock:
                         self.latest_predictions[symbol] = {
@@ -454,10 +524,8 @@ class StockAnalyzerApp(ctk.CTk):
                             "conf": prob,
                             "reason": reason
                         }
-                    
-                    # Record the crossover to track its profitability outcome
-                    self.predictor.record_new_crossover(symbol, signal, tick.ltp, time.time(), features)
                     print(f"Crossover Detected: {symbol} | {signal} | Rec: {decision} | Conf: {prob:.1f}% | {reason}")
+                    self.ml_panel.log_crossover(symbol, signal, tick.ltp, features, decision, prob, reason)
 
     def _refresh_loop(self):
         """Core UI refresh loop updating charts, depth, and diagnostics frames."""

@@ -20,8 +20,10 @@ class RealTimeTable(ctk.CTkFrame):
         
         self.headers = [
             "Symbol", "LTP", "Bid (Qty)", "Ask (Qty)", 
-            "SMMA (20)", "SMMA (120)", "Vol (5M)", "Vol (20M)", "Vol (60M)",
-            "Avg (20M)", "Avg (60M)", "Signal", "ML Rec", "ML Conf"
+            "SMMA(20)", "SMMA(120)", 
+            "LTQ", "A2(2M)", "A5(5M)", "A2/A5", "SideShare",
+            "Vol(5M)", "Vol(20M)", "Vol(60M)", 
+            "Avg(20M)", "Avg(60M)", "Signal", "ML Rec"
         ]
         
         self.row_symbols: List[str] = []
@@ -152,18 +154,31 @@ class RealTimeTable(ctk.CTkFrame):
         # Indicators
         s20 = data.get("smma20")
         s120 = data.get("smma120")
-        cells["SMMA (20)"].configure(text=f"₹{s20:.2f}" if s20 and not np.isnan(s20) else "-")
-        cells["SMMA (120)"].configure(text=f"₹{s120:.2f}" if s120 and not np.isnan(s120) else "-")
+        cells["SMMA(20)"].configure(text=f"₹{s20:.2f}" if s20 and not np.isnan(s20) else "-")
+        cells["SMMA(120)"].configure(text=f"₹{s120:.2f}" if s120 and not np.isnan(s120) else "-")
+        
+        # LTQ Burst
+        ltq = data.get("ltq", 0)
+        a2 = data.get("a2", 0.0)
+        a5 = data.get("a5", 0.0)
+        ratio = data.get("ratio", 1.0)
+        side_share = data.get("side_share", 0.5)
+        
+        cells["LTQ"].configure(text=self._format_qty(ltq))
+        cells["A2(2M)"].configure(text=f"{a2:.1f}" if a2 > 0 else "-")
+        cells["A5(5M)"].configure(text=f"{a5:.1f}" if a5 > 0 else "-")
+        cells["A2/A5"].configure(text=f"{ratio:.2f}x" if a5 > 0 else "-")
+        cells["SideShare"].configure(text=f"{side_share*100:.1f}%" if a2 > 0 else "-")
         
         # Aggregations
-        cells["Vol (5M)"].configure(text=self._format_qty(data.get("vol_5m", 0)))
-        cells["Vol (20M)"].configure(text=self._format_qty(data.get("vol_20m", 0)))
-        cells["Vol (60M)"].configure(text=self._format_qty(data.get("vol_60m", 0)))
+        cells["Vol(5M)"].configure(text=self._format_qty(data.get("vol_5m", 0)))
+        cells["Vol(20M)"].configure(text=self._format_qty(data.get("vol_20m", 0)))
+        cells["Vol(60M)"].configure(text=self._format_qty(data.get("vol_60m", 0)))
         
         ap20 = data.get("avg_price_20m", 0.0)
         ap60 = data.get("avg_price_60m", 0.0)
-        cells["Avg (20M)"].configure(text=f"₹{ap20:.2f}" if ap20 > 0 else "-")
-        cells["Avg (60M)"].configure(text=f"₹{ap60:.2f}" if ap60 > 0 else "-")
+        cells["Avg(20M)"].configure(text=f"₹{ap20:.2f}" if ap20 > 0 else "-")
+        cells["Avg(60M)"].configure(text=f"₹{ap60:.2f}" if ap60 > 0 else "-")
         
         # Signals & ML
         sig = data.get("signal", "NONE")
@@ -175,15 +190,13 @@ class RealTimeTable(ctk.CTkFrame):
             cells["Signal"].configure(text="-", text_color=config.TEXT_PRIMARY, font=ctk.CTkFont(family=config.FONT_FAMILY, size=11))
             
         rec = data.get("ml_rec", "NONE")
+        conf = data.get("ml_conf", 0.0)
         if rec == "ACCEPT":
-            cells["ML Rec"].configure(text="ACCEPT", text_color=config.COLOR_BULLISH, font=ctk.CTkFont(family=config.FONT_FAMILY, size=11, weight="bold"))
+            cells["ML Rec"].configure(text=f"ACCEPT ({conf:.1f}%)", text_color=config.COLOR_BULLISH, font=ctk.CTkFont(family=config.FONT_FAMILY, size=11, weight="bold"))
         elif rec == "AVOID":
-            cells["ML Rec"].configure(text="AVOID", text_color=config.COLOR_WARNING, font=ctk.CTkFont(family=config.FONT_FAMILY, size=11, weight="bold"))
+            cells["ML Rec"].configure(text=f"AVOID ({conf:.1f}%)", text_color=config.COLOR_WARNING, font=ctk.CTkFont(family=config.FONT_FAMILY, size=11, weight="bold"))
         else:
             cells["ML Rec"].configure(text="-", text_color=config.TEXT_PRIMARY, font=ctk.CTkFont(family=config.FONT_FAMILY, size=11))
-            
-        conf = data.get("ml_conf", 0.0)
-        cells["ML Conf"].configure(text=f"{conf:.1f}%" if conf > 0 else "-")
 
     def _format_qty(self, qty: int) -> str:
         """Formats volume into compact Indian representation (Lakhs/Cr)."""
@@ -586,81 +599,179 @@ class MarketDepthPanel(ctk.CTkFrame):
 
 
 class MLDiagnosticsPanel(ctk.CTkFrame):
-    """Displays the AI/ML diagnostics details, online accuracy, and active trade trackers."""
+    """Displays the AI/ML diagnostics details, completed trade history, and real-time crossover signal logs."""
     def __init__(self, master, predictor: CrossoverPredictor, **kwargs):
         super().__init__(master, **kwargs)
         self.predictor = predictor
         self.configure(fg_color=config.BG_CARD)
         
-        # Panel Title
-        self.lbl_title = ctk.CTkLabel(
-            self, text="AI/ML Predictor Diagnostics",
-            font=ctk.CTkFont(family=config.FONT_FAMILY, size=13, weight="bold"),
-            text_color=config.COLOR_ACCENT
-        )
-        self.lbl_title.pack(anchor="w", padx=10, pady=5)
+        # Create Tab View inside Diagnostics Panel
+        self.tabview = ctk.CTkTabview(self, fg_color="transparent")
+        self.tabview.pack(fill="both", expand=True, padx=5, pady=5)
         
-        # Accuracy Frame
-        self.acc_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.acc_frame.pack(fill="x", padx=10, pady=2)
+        self.tabview.add("Diagnostics")
+        self.tabview.add("Trade History")
+        self.tabview.add("Signal Logs")
         
-        self.lbl_acc_text = ctk.CTkLabel(self.acc_frame, text="Session AI Success Rate:", font=(config.FONT_FAMILY, 11))
-        self.lbl_acc_text.pack(side="left")
+        # Setup Tabs
+        self._setup_diagnostics_tab()
+        self._setup_history_tab()
+        self._setup_logs_tab()
+
+    def _setup_diagnostics_tab(self):
+        """Builds the success rate, feature weights, and side-by-side backtest table."""
+        tab = self.tabview.tab("Diagnostics")
         
-        self.lbl_acc_val = ctk.CTkLabel(self.acc_frame, text="-%", text_color=config.COLOR_BULLISH, font=(config.FONT_FAMILY, 11, "bold"))
+        # Success Rate Row
+        acc_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        acc_frame.pack(fill="x", padx=5, pady=2)
+        
+        lbl_acc_text = ctk.CTkLabel(acc_frame, text="Model Active Success Rate:", font=(config.FONT_FAMILY, 11))
+        lbl_acc_text.pack(side="left")
+        
+        self.lbl_acc_val = ctk.CTkLabel(acc_frame, text="-%", text_color=config.COLOR_BULLISH, font=(config.FONT_FAMILY, 11, "bold"))
         self.lbl_acc_val.pack(side="right")
         
-        # Feature Importance section
-        self.lbl_feat_hdr = ctk.CTkLabel(self, text="RF Feature Importances:", text_color=config.TEXT_SECONDARY, font=(config.FONT_FAMILY, 10, "bold"))
-        self.lbl_feat_hdr.pack(anchor="w", padx=10, pady=(5, 2))
+        # Backtest Grid Header
+        lbl_bt_hdr = ctk.CTkLabel(tab, text="Portfolio Backtest Comparison:", text_color=config.TEXT_SECONDARY, font=(config.FONT_FAMILY, 10, "bold"))
+        lbl_bt_hdr.pack(anchor="w", padx=5, pady=(5, 1))
         
-        self.feat_frame = ctk.CTkFrame(self, fg_color="transparent")
-        self.feat_frame.pack(fill="x", padx=10, pady=2)
+        self._setup_backtest_table(tab)
+        
+        # Feature Importance section
+        lbl_feat_hdr = ctk.CTkLabel(tab, text="RF Feature Importances:", text_color=config.TEXT_SECONDARY, font=(config.FONT_FAMILY, 10, "bold"))
+        lbl_feat_hdr.pack(anchor="w", padx=5, pady=(5, 1))
+        
+        self.feat_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        self.feat_frame.pack(fill="x", padx=5, pady=1)
         
         self.feat_bars: Dict[str, Tuple[ctk.CTkLabel, ctk.CTkProgressBar]] = {}
         self._setup_feature_bars()
         
-        # Active trades tracking list
-        self.lbl_trades_hdr = ctk.CTkLabel(self, text="Active Trade Monitor:", text_color=config.TEXT_SECONDARY, font=(config.FONT_FAMILY, 10, "bold"))
-        self.lbl_trades_hdr.pack(anchor="w", padx=10, pady=(8, 2))
+        # Active positions list at bottom of diagnostics tab
+        lbl_trades_hdr = ctk.CTkLabel(tab, text="Active Positions Monitor:", text_color=config.TEXT_SECONDARY, font=(config.FONT_FAMILY, 10, "bold"))
+        lbl_trades_hdr.pack(anchor="w", padx=5, pady=(5, 1))
         
-        self.trades_scroll = ctk.CTkScrollableFrame(self, height=80, fg_color="#101524")
-        self.trades_scroll.pack(fill="x", padx=10, pady=2)
+        self.trades_scroll = ctk.CTkScrollableFrame(tab, height=65, fg_color="#101524")
+        self.trades_scroll.pack(fill="x", padx=5, pady=1)
         
         self.trade_widgets: Dict[str, ctk.CTkFrame] = {}
+
+    def _setup_backtest_table(self, tab):
+        """Creates the grid for the Unfiltered vs ML Filtered comparison."""
+        table_frame = ctk.CTkFrame(tab, fg_color="#101524")
+        table_frame.pack(fill="x", padx=5, pady=2)
+        
+        # Headers
+        headers = ["Metric", "Unfiltered", "ML Filtered"]
+        for c_idx, h in enumerate(headers):
+            table_frame.grid_columnconfigure(c_idx, weight=1)
+            lbl = ctk.CTkLabel(table_frame, text=h, font=(config.FONT_FAMILY, 9, "bold"), text_color=config.TEXT_SECONDARY)
+            lbl.grid(row=0, column=c_idx, padx=5, pady=1, sticky="ew")
+            
+        self.backtest_labels = {}
+        metrics = [
+            ("trades", "Total Trades"),
+            ("win_rate", "Win Rate %"),
+            ("net_pnl", "Net P&L (pts)"),
+            ("max_dd", "Max Drawdown")
+        ]
+        
+        for r_idx, (key, name) in enumerate(metrics, start=1):
+            lbl_name = ctk.CTkLabel(table_frame, text=name, font=(config.FONT_FAMILY, 9), anchor="w")
+            lbl_name.grid(row=r_idx, column=0, padx=5, pady=1, sticky="w")
+            
+            lbl_unf = ctk.CTkLabel(table_frame, text="-", font=(config.FONT_FAMILY, 9, "bold"), text_color=config.TEXT_PRIMARY)
+            lbl_unf.grid(row=r_idx, column=1, padx=5, pady=1)
+            
+            lbl_filt = ctk.CTkLabel(table_frame, text="-", font=(config.FONT_FAMILY, 9, "bold"), text_color=config.COLOR_BULLISH)
+            lbl_filt.grid(row=r_idx, column=2, padx=5, pady=1)
+            
+            self.backtest_labels[key] = (lbl_unf, lbl_filt)
 
     def _setup_feature_bars(self):
         """Creates horizontal progress bars for each model feature weight."""
         features = {
-            "trend_slope": "Trend Slope",
-            "smma_diff": "SMMA Diff",
-            "volatility": "Volatility",
-            "volume_ratio": "Volume Ratio",
-            "bid_ask_imbalance": "Depth Imbal",
-            "spread_pct": "Spread"
+            "A2": "A2 (2M)",
+            "A5": "A5 (5M)",
+            "ratio": "A2/A5 Ratio",
+            "side_share": "Side Share",
+            "max_ltq": "Max LTQ",
+            "slope_gap": "Slope Gap",
+            "time_of_day": "Time of Day"
         }
         
         for col, display_name in features.items():
             row = ctk.CTkFrame(self.feat_frame, fg_color="transparent")
-            row.pack(fill="x", pady=1)
+            row.pack(fill="x", pady=0)
             
-            lbl_name = ctk.CTkLabel(row, text=display_name, width=80, font=(config.FONT_FAMILY, 10), anchor="w")
+            lbl_name = ctk.CTkLabel(row, text=display_name, width=80, font=(config.FONT_FAMILY, 9), anchor="w")
             lbl_name.pack(side="left")
             
-            bar = ctk.CTkProgressBar(row, progress_color=config.COLOR_ACCENT, fg_color="#1e293b", height=10)
+            bar = ctk.CTkProgressBar(row, progress_color=config.COLOR_ACCENT, fg_color="#1e293b", height=6)
             bar.pack(side="left", fill="x", expand=True, padx=5)
             bar.set(0.0)
             
-            lbl_val = ctk.CTkLabel(row, text="-%", width=35, font=(config.FONT_FAMILY, 10), anchor="e")
+            lbl_val = ctk.CTkLabel(row, text="-%", width=35, font=(config.FONT_FAMILY, 9), anchor="e")
             lbl_val.pack(side="right")
             
             self.feat_bars[col] = (lbl_val, bar)
 
+    def _setup_history_tab(self):
+        """Builds Completed Trades history list table (Buy/Sell logic, entries, exits, P&L)."""
+        tab = self.tabview.tab("Trade History")
+        
+        # Table column headers
+        hdrs_frame = ctk.CTkFrame(tab, fg_color="#101524", height=24)
+        hdrs_frame.pack(fill="x", padx=2, pady=2)
+        
+        cols = [("Sym", 1), ("Type", 1), ("Entry", 1), ("Exit", 1), ("P&L", 1), ("System", 2)]
+        for col_idx, (text, weight) in enumerate(cols):
+            hdrs_frame.grid_columnconfigure(col_idx, weight=weight)
+            lbl = ctk.CTkLabel(hdrs_frame, text=text, font=(config.FONT_FAMILY, 9, "bold"), text_color=config.TEXT_SECONDARY)
+            lbl.grid(row=0, column=col_idx, padx=2, pady=2, sticky="ew")
+            
+        # Scrollable container for closed trade rows
+        self.history_scroll = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        self.history_scroll.pack(fill="both", expand=True, padx=2, pady=1)
+        self.history_rows: List[ctk.CTkFrame] = []
+
+    def _setup_logs_tab(self):
+        """Builds scrollable textbox log for crossover signal details."""
+        tab = self.tabview.tab("Signal Logs")
+        
+        self.log_text = ctk.CTkTextbox(tab, font=(config.FONT_FAMILY, 9), fg_color="#101524", border_width=1, border_color="#1e293b")
+        self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
+        self.log_text.insert("end", "=== Waiting for Crossover Signals ===\n")
+        self.log_text.configure(state="disabled")
+
     def refresh_diagnostics(self):
-        """Updates accuracy rates, feature importances, and trade monitor details."""
-        # 1. Update Success Rate
-        acc = self.predictor.get_model_accuracy()
-        self.lbl_acc_val.configure(text=f"{acc:.1f}%")
+        """Updates accuracy rates, feature importances, backtest table, and active trade list."""
+        # 1. Update Backtest Table
+        report = self.predictor.get_backtest_report()
+        unf = report["unfiltered"]
+        filt = report["filtered"]
+        
+        self.backtest_labels["trades"][0].configure(text=str(unf["trades"]))
+        self.backtest_labels["trades"][1].configure(text=str(filt["trades"]))
+        
+        self.backtest_labels["win_rate"][0].configure(text=f"{unf['win_rate']:.1f}%")
+        self.backtest_labels["win_rate"][1].configure(text=f"{filt['win_rate']:.1f}%")
+        
+        unf_pnl = unf["net_pnl"]
+        filt_pnl = filt["net_pnl"]
+        
+        self.backtest_labels["net_pnl"][0].configure(
+            text=f"₹{unf_pnl:.2f}" if abs(unf_pnl) > 0 else "-",
+            text_color=config.COLOR_BULLISH if unf_pnl >= 0 else config.COLOR_BEARISH
+        )
+        self.backtest_labels["net_pnl"][1].configure(
+            text=f"₹{filt_pnl:.2f}" if abs(filt_pnl) > 0 else "-",
+            text_color=config.COLOR_BULLISH if filt_pnl >= 0 else config.COLOR_BEARISH
+        )
+        
+        self.backtest_labels["max_dd"][0].configure(text=f"₹{unf['max_dd']:.2f}" if unf["max_dd"] > 0 else "-", text_color=config.COLOR_BEARISH)
+        self.backtest_labels["max_dd"][1].configure(text=f"₹{filt['max_dd']:.2f}" if filt["max_dd"] > 0 else "-", text_color=config.COLOR_BEARISH)
         
         # 2. Update Feature Importances
         importances = self.predictor.get_feature_importances()
@@ -670,41 +781,137 @@ class MLDiagnosticsPanel(ctk.CTkFrame):
                 lbl.configure(text=f"{val:.1f}%")
                 bar.set(val / 100.0)
                 
-        # 3. Update Active Trades Monitoring
-        # Clear removed widgets
-        active_ids = {f"{t.symbol}_{t.signal_type}_{t.entry_time}" for t in self.predictor.active_trades}
+        # 3. Update Success Rate
+        self.lbl_acc_val.configure(text=f"{filt['win_rate']:.1f}%" if filt['trades'] > 0 else "-%")
+        
+        # 4. Update Active Trades
+        active_ids = set()
+        active_list = []
+        
+        with self.predictor.lock:
+            for symbol, t in self.predictor.active_unfiltered.items():
+                active_list.append((t, "UNFILTERED"))
+            for symbol, t in self.predictor.active_filtered.items():
+                active_list.append((t, "ML FILTERED"))
+                
+        for trade, port_name in active_list:
+            active_ids.add(f"{trade.symbol}_{trade.signal_type}_{trade.entry_time}_{port_name}")
+            
         for key in list(self.trade_widgets.keys()):
             if key not in active_ids:
                 self.trade_widgets[key].destroy()
                 del self.trade_widgets[key]
                 
-        # Create/Update active trade rows
-        for trade in self.predictor.active_trades:
-            key = f"{trade.symbol}_{trade.signal_type}_{trade.entry_time}"
+        for trade, port_name in active_list:
+            key = f"{trade.symbol}_{trade.signal_type}_{trade.entry_time}_{port_name}"
+            floating_pnl = (trade.current_price - trade.entry_price) if trade.signal_type == "BUY" else (trade.entry_price - trade.current_price)
+            floating_pnl_pct = (floating_pnl / trade.entry_price) * 100 if trade.entry_price > 0 else 0.0
             
-            pnl_color = config.COLOR_BULLISH if trade.pnl_pct >= 0 else config.COLOR_BEARISH
-            pnl_sign = "+" if trade.pnl_pct >= 0 else ""
+            pnl_color = config.COLOR_BULLISH if floating_pnl >= 0 else config.COLOR_BEARISH
+            pnl_sign = "+" if floating_pnl >= 0 else ""
             
             symbol_short = trade.symbol.replace("NSE:", "").replace("-EQ", "")
-            trade_text = f"{trade.signal_type} {symbol_short} @ ₹{trade.entry_price:.2f} | Hold: {trade.candles_held}m"
-            pnl_text = f"{pnl_sign}{trade.pnl_pct:.2f}%"
+            trade_text = f"[{port_name[:4]}] {trade.signal_type} {symbol_short} @ ₹{trade.entry_price:.2f}"
+            pnl_text = f"{pnl_sign}₹{floating_pnl:.2f} ({pnl_sign}{floating_pnl_pct:.2f}%)"
             
             if key not in self.trade_widgets:
-                row_frame = ctk.CTkFrame(self.trades_scroll, fg_color="#1a2236", height=24)
+                row_frame = ctk.CTkFrame(self.trades_scroll, fg_color="#1a2236", height=20)
                 row_frame.pack(fill="x", pady=1)
                 
-                lbl_info = ctk.CTkLabel(row_frame, text=trade_text, font=(config.FONT_FAMILY, 10), anchor="w")
+                lbl_info = ctk.CTkLabel(row_frame, text=trade_text, font=(config.FONT_FAMILY, 9), anchor="w")
                 lbl_info.pack(side="left", padx=5)
                 
-                lbl_pnl = ctk.CTkLabel(row_frame, text=pnl_text, text_color=pnl_color, font=(config.FONT_FAMILY, 10, "bold"), anchor="e")
+                lbl_pnl = ctk.CTkLabel(row_frame, text=pnl_text, text_color=pnl_color, font=(config.FONT_FAMILY, 9, "bold"), anchor="e")
                 lbl_pnl.pack(side="right", padx=5)
                 
-                # Save references
                 self.trade_widgets[key] = row_frame
             else:
-                # Update text on existing widgets
                 frame = self.trade_widgets[key]
                 children = frame.winfo_children()
                 if len(children) >= 2:
                     children[0].configure(text=trade_text)
                     children[1].configure(text=pnl_text, text_color=pnl_color)
+                    
+        # Update Completed Trades tab
+        self.update_completed_trades()
+
+    def log_crossover(self, symbol: str, signal_type: str, price: float, features: Dict[str, float], decision: str, prob: float, reason: str):
+        """Appends a detailed log line to the scrolling text log tab showing FYI and ML tags."""
+        self.log_text.configure(state="normal")
+        
+        from datetime import datetime
+        time_str = datetime.now().strftime("%H:%M:%S")
+        symbol_short = symbol.replace("NSE:", "").replace("-EQ", "")
+        
+        # FYI check: Average LTQ over last 2 minutes > Average LTQ over last 5 minutes
+        fyi_burst_active = "ACTIVE" if features['A2'] > features['A5'] else "INACTIVE"
+        
+        log_line = f"[{time_str}] {symbol_short}: {signal_type} Crossover @ ₹{price:.2f}\n"
+        log_line += f"  - FYI Burst Test: A2 ({self._format_qty(int(features['A2']))}) > A5 ({self._format_qty(int(features['A5']))}) -> {fyi_burst_active} ({features['ratio']:.2f}x Ratio)\n"
+        log_line += f"  - Side classified LTQ Share: {features['side_share']*100:.1f}%\n"
+        log_line += f"  - ML Decision: {decision} (Probability: {prob:.1f}%)\n"
+        log_line += f"  - Reason: {reason}\n\n"
+        
+        self.log_text.insert("end", log_line)
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+    def update_completed_trades(self):
+        """Rebuilds Completed Trades rows in the Trade History tab from actual trade logs."""
+        # Clear existing rows
+        for row in self.history_rows:
+            row.destroy()
+        self.history_rows.clear()
+        
+        # Merge Unfiltered and Filtered trades
+        all_completed = []
+        with self.predictor.lock:
+            for t in self.predictor.unfiltered_trades:
+                all_completed.append((t, "UNFILTERED"))
+            for t in self.predictor.filtered_trades:
+                all_completed.append((t, "ML FILTERED"))
+                
+        # Sort by exit time descending (newest first)
+        all_completed.sort(key=lambda x: x[0].exit_time, reverse=True)
+        
+        # Display rows
+        for idx, (trade, portfolio) in enumerate(all_completed):
+            bg_color = "#151b2d" if idx % 2 == 0 else "#101422"
+            row_frame = ctk.CTkFrame(self.history_scroll, fg_color=bg_color, height=22, corner_radius=2)
+            row_frame.pack(fill="x", pady=1, padx=2)
+            self.history_rows.append(row_frame)
+            
+            # Setup columns
+            row_frame.grid_columnconfigure(0, weight=1) # Sym
+            row_frame.grid_columnconfigure(1, weight=1) # Type
+            row_frame.grid_columnconfigure(2, weight=1) # Entry
+            row_frame.grid_columnconfigure(3, weight=1) # Exit
+            row_frame.grid_columnconfigure(4, weight=1) # P&L
+            row_frame.grid_columnconfigure(5, weight=2) # System
+            
+            pnl_color = config.COLOR_BULLISH if trade.pnl >= 0 else config.COLOR_BEARISH
+            pnl_sign = "+" if trade.pnl >= 0 else ""
+            
+            sym = trade.symbol.replace("NSE:", "").replace("-EQ", "")
+            
+            ctk.CTkLabel(row_frame, text=sym, font=(config.FONT_FAMILY, 9, "bold")).grid(row=0, column=0, sticky="ew")
+            
+            type_color = config.COLOR_BULLISH if trade.signal_type == "BUY" else config.COLOR_BEARISH
+            ctk.CTkLabel(row_frame, text=trade.signal_type, text_color=type_color, font=(config.FONT_FAMILY, 9, "bold")).grid(row=0, column=1, sticky="ew")
+            
+            ctk.CTkLabel(row_frame, text=f"₹{trade.entry_price:.2f}", font=(config.FONT_FAMILY, 9)).grid(row=0, column=2, sticky="ew")
+            ctk.CTkLabel(row_frame, text=f"₹{trade.exit_price:.2f}", font=(config.FONT_FAMILY, 9)).grid(row=0, column=3, sticky="ew")
+            
+            ctk.CTkLabel(row_frame, text=f"{pnl_sign}₹{trade.pnl:.2f}", text_color=pnl_color, font=(config.FONT_FAMILY, 9, "bold")).grid(row=0, column=4, sticky="ew")
+            
+            sys_color = config.COLOR_ACCENT if portfolio == "ML FILTERED" else config.TEXT_SECONDARY
+            ctk.CTkLabel(row_frame, text=portfolio, text_color=sys_color, font=(config.FONT_FAMILY, 9, "bold")).grid(row=0, column=5, sticky="ew")
+
+    def _format_qty(self, qty: int) -> str:
+        if qty >= 10000000:
+            return f"{qty / 10000000:.2f} Cr"
+        elif qty >= 100000:
+            return f"{qty / 100000:.2f} L"
+        elif qty >= 1000:
+            return f"{qty / 1000:.1f} K"
+        return str(qty)

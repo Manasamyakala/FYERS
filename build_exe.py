@@ -1,19 +1,14 @@
-# build_exe.py
-# Python script to compile the application into a standalone executable using PyInstaller.
-# Automatically detects and bundles CustomTkinter asset resources to prevent runtime loading issues.
-
 import os
 import sys
 import customtkinter
 import PyInstaller.__main__
 
 def compile_executable():
-    # Retrieve absolute path of customtkinter library to bundle its asset theme files
+
     ctk_path = os.path.dirname(customtkinter.__file__)
     print(f"CustomTkinter package location detected at: {ctk_path}")
     
-    # Formulate PyInstaller build arguments
-    # Includes --onefile to produce a single EXE, and --noconsole to suppress command line windows.
+   
     args = [
         'main.py',
         '--onefile',

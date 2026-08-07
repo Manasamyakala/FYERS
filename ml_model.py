@@ -13,76 +13,39 @@ from sklearn.ensemble import RandomForestClassifier
 import config
 
 class TradeRecord:
-    """Represents a mock or live trade triggered by a crossover to track profitability."""
+    """Represents a mock or live trade triggered by a crossover, closed ONLY by the opposite crossover."""
     def __init__(self, symbol: str, signal_type: str, entry_price: float, timestamp: float, features: Dict[str, float]):
         self.symbol = symbol
-        self.signal_type = signal_type  # "BUY" or "SELL"
+        self.signal_type = signal_type  # "BUY" (Long) or "SELL" (Short)
         self.entry_price = entry_price
         self.entry_time = timestamp
         self.features = features
-        self.highest_price = entry_price
-        self.lowest_price = entry_price
         self.current_price = entry_price
         
         self.status = "PENDING"  # "PENDING", "WIN", "LOSS"
         self.exit_price = 0.0
         self.exit_time = 0.0
-        self.candles_held = 0
+        self.pnl = 0.0
         self.pnl_pct = 0.0
 
-    def update(self, current_price: float, now: float) -> bool:
-        """
-        Updates the trade with the latest price.
-        Returns True if the trade is resolved (WIN/LOSS), False if still pending.
-        """
-        if self.status != "PENDING":
-            return True
-            
-        self.current_price = current_price
-        self.highest_price = max(self.highest_price, current_price)
-        self.lowest_price = min(self.lowest_price, current_price)
+    def exit_trade(self, exit_price: float, exit_time: float):
+        """Closes the trade at the opposite crossover and calculates final P&L."""
+        self.exit_price = exit_price
+        self.exit_time = exit_time
         
-        # Calculate percentage changes
-        pnl = 0.0
         if self.signal_type == "BUY":
-            pnl = ((current_price - self.entry_price) / self.entry_price) * 100
+            # Entry = Buy LTP, Exit = Sell LTP
+            self.pnl = exit_price - self.entry_price
+        else:  # SELL
+            # Entry = Sell LTP, Exit = Buy LTP
+            self.pnl = self.entry_price - exit_price
             
-            # Check Take Profit
-            if current_price >= self.entry_price * (1 + config.TAKE_PROFIT_PCT / 100):
-                self.status = "WIN"
-                self.exit_price = current_price
-                self.exit_time = now
-            # Check Stop Loss
-            elif current_price <= self.entry_price * (1 - config.STOP_LOSS_PCT / 100):
-                self.status = "LOSS"
-                self.exit_price = current_price
-                self.exit_time = now
-                
-        else:  # "SELL"
-            pnl = ((self.entry_price - current_price) / self.entry_price) * 100
-            
-            # Check Take Profit (price drops below target)
-            if current_price <= self.entry_price * (1 - config.TAKE_PROFIT_PCT / 100):
-                self.status = "WIN"
-                self.exit_price = current_price
-                self.exit_time = now
-            # Check Stop Loss (price rises above stop)
-            elif current_price >= self.entry_price * (1 + config.STOP_LOSS_PCT / 100):
-                self.status = "LOSS"
-                self.exit_price = current_price
-                self.exit_time = now
-                
-        self.pnl_pct = pnl
-        
-        # Check time limit resolution
-        if self.status == "PENDING" and self.candles_held >= config.MAX_TRADE_HOLD_CANDLES:
-            if pnl > 0:
-                self.status = "WIN"
-            else:
-                self.status = "LOSS"
-            self.exit_price = current_price
-            self.exit_time = now
+        self.pnl_pct = (self.pnl / self.entry_price) * 100 if self.entry_price > 0 else 0.0
+        self.status = "WIN" if self.pnl > 0.0 else "LOSS"
 
+    def update(self, current_price: float, now: float) -> bool:
+        """Updates the trade with the latest price."""
+        self.current_price = current_price
         return self.status != "PENDING"
 
 
@@ -91,12 +54,13 @@ class CrossoverPredictor:
     def __init__(self):
         self.model = RandomForestClassifier(n_estimators=50, random_state=42)
         self.features_columns = [
-            "trend_slope",
-            "smma_diff",
-            "volatility",
-            "volume_ratio",
-            "bid_ask_imbalance",
-            "spread_pct"
+            "A2",
+            "A5",
+            "ratio",
+            "side_share",
+            "max_ltq",
+            "slope_gap",
+            "time_of_day"
         ]
         
         # Training dataset accumulator
@@ -106,9 +70,12 @@ class CrossoverPredictor:
         # Lock for thread safety
         self.lock = threading.Lock()
         
-        # Trade logs
-        self.active_trades: List[TradeRecord] = []
-        self.completed_trades: List[TradeRecord] = []
+        # Double Portfolio Databases: Unfiltered vs ML Filtered
+        self.unfiltered_trades: List[TradeRecord] = []
+        self.filtered_trades: List[TradeRecord] = []
+        
+        self.active_unfiltered: Dict[str, TradeRecord] = {}
+        self.active_filtered: Dict[str, TradeRecord] = {}
         
         # Generate synthetic data and fit initial model so it functions immediately
         self._initialize_synthetic_model()
@@ -120,136 +87,100 @@ class CrossoverPredictor:
         n_samples = 1500
         
         # Synthesize typical features
-        trend_slope = np.random.uniform(-0.1, 0.1, n_samples)
-        smma_diff = np.random.uniform(0.01, 0.2, n_samples)
-        volatility = np.random.uniform(0.02, 0.4, n_samples)
-        volume_ratio = np.random.uniform(0.5, 3.0, n_samples)
-        bid_ask_imbalance = np.random.uniform(-0.8, 0.8, n_samples)
-        spread_pct = np.random.uniform(0.01, 0.15, n_samples)
+        a5 = np.random.uniform(10000, 500000, n_samples)
+        ratio = np.random.uniform(0.4, 3.0, n_samples)
+        a2 = a5 * ratio
+        side_share = np.random.uniform(0.1, 0.9, n_samples)
+        max_ltq = a5 * np.random.uniform(1.5, 4.0, n_samples)
+        slope_gap = np.random.uniform(0.01, 1.5, n_samples)
+        time_of_day = np.random.uniform(0, 375, n_samples)
         
         y = np.zeros(n_samples, dtype=int)
         
-        # Buy signals (Assume trend_slope > 0 is Buy context, < 0 is Sell)
-        # We will split data: 50% buy signals, 50% sell signals
+        # Pre-train buy/sell rules
         for i in range(n_samples):
             is_buy = i < (n_samples / 2)
+            score = 0.0
             
-            # Simple rule-based probability model + noise
+            # Burst rule: A2 > A5 (ratio > 1.2 or so)
+            if ratio[i] > 1.2:
+                score += 2.0
+            elif ratio[i] < 0.8:
+                score -= 1.5
+                
+            # Crossover angle strength
+            if slope_gap[i] > 0.15:
+                score += 1.5
+                
             if is_buy:
-                # Profitable Buy Crossover rules:
-                # - Major Trend is UP (trend_slope > 0)
-                # - Volatility is healthy (> 0.05% but < 0.25% to avoid high spread/panic)
-                # - Buying pressure in depth (bid_ask_imbalance > 0.1)
-                # - Volume spike (volume_ratio > 1.2)
-                # - Low Spread (< 0.06%)
-                score = 0.0
-                if trend_slope[i] > 0.01: score += 2
-                if 0.05 <= volatility[i] <= 0.25: score += 2
-                if bid_ask_imbalance[i] > 0.15: score += 2
-                if volume_ratio[i] > 1.3: score += 1.5
-                if spread_pct[i] < 0.05: score += 1.5
-                
-                prob = 1.0 / (1.0 + np.exp(-(score - 4.5))) # Sigmoid mapping
-                y[i] = 1 if np.random.rand() < prob else 0
+                # Buy side share: buy-side share should be high (> 0.55)
+                if side_share[i] > 0.55:
+                    score += 2.5
+                elif side_share[i] < 0.45:
+                    score -= 2.0
             else:
-                # Profitable Sell Crossover rules:
-                # - Major Trend is DOWN (trend_slope < -0.01)
-                # - Volatility is healthy
-                # - Selling pressure in depth (bid_ask_imbalance < -0.15)
-                # - Volume spike (volume_ratio > 1.3)
-                # - Low Spread (< 0.05%)
-                score = 0.0
-                if trend_slope[i] < -0.01: score += 2
-                if 0.05 <= volatility[i] <= 0.25: score += 2
-                if bid_ask_imbalance[i] < -0.15: score += 2
-                if volume_ratio[i] > 1.3: score += 1.5
-                if spread_pct[i] < 0.05: score += 1.5
-                
-                prob = 1.0 / (1.0 + np.exp(-(score - 4.5)))
-                y[i] = 1 if np.random.rand() < prob else 0
-                
+                # Sell side share: buy-side share should be low (< 0.45, meaning sell-side share > 0.55)
+                if side_share[i] < 0.45:
+                    score += 2.5
+                elif side_share[i] > 0.55:
+                    score -= 2.0
+                    
+            prob = 1.0 / (1.0 + np.exp(-(score - 2.0)))
+            y[i] = 1 if np.random.rand() < prob else 0
+            
         # Format into Pandas DataFrame
         df_x = pd.DataFrame({
-            "trend_slope": trend_slope,
-            "smma_diff": smma_diff,
-            "volatility": volatility,
-            "volume_ratio": volume_ratio,
-            "bid_ask_imbalance": bid_ask_imbalance,
-            "spread_pct": spread_pct
+            "A2": a2,
+            "A5": a5,
+            "ratio": ratio,
+            "side_share": side_share,
+            "max_ltq": max_ltq,
+            "slope_gap": slope_gap,
+            "time_of_day": time_of_day
         })
         
-        # Fit model
         self.model.fit(df_x, y)
-        
-        # Pre-populate training history
         self.X_train = df_x.values.tolist()
         self.y_train = y.tolist()
 
-    def extract_features(self, symbol: str, signal_type: str, candles: List[Any], tick: TickData) -> Optional[Dict[str, float]]:
+    def extract_features(self, symbol: str, signal_type: str, candles: List[Any], tick: Any, feed: Any) -> Optional[Dict[str, float]]:
         """Extracts numerical features from the current market state for the ML model."""
         if len(candles) < 20:
             return None
             
         closes = [c.close for c in candles]
-        volumes = [c.volume for c in candles]
         
-        # 1. Major Trend Slope (SMMA 120 slope over last 5 candles)
-        # Calculate SMMA 120 for the last 5 bars
+        # 1. Slope Gap: Distance and angle of crossover
+        # Calculate fast and slow averages
         import indicators
-        smma120_history = indicators.calculate_smma(closes, 120)
+        smma20_history = indicators.calculate_smma(closes, config.SMMA_FAST_PERIOD)
+        smma120_history = indicators.calculate_smma(closes, config.SMMA_SLOW_PERIOD)
         
-        # Make sure we have enough valid SMMA 120 values
-        if np.isnan(smma120_history[-5]):
-            # Fallback if SMMA 120 is not fully populated (e.g. at startup)
-            # Use simple linear regression slope of last 10 close prices
-            x = np.arange(10)
-            y = np.array(closes[-10:])
-            slope = np.polyfit(x, y, 1)[0]
-            trend_slope = (slope / closes[-1]) * 100 # Normalize as percentage of price
+        if len(smma20_history) < 2 or len(smma120_history) < 2 or np.isnan(smma20_history[-2]) or np.isnan(smma120_history[-2]):
+            slope_gap = 0.05
         else:
-            smma120_last_5 = smma120_history[-5:]
-            slope = smma120_last_5[-1] - smma120_last_5[0]
-            trend_slope = (slope / smma120_last_5[-1]) * 100 # Percent change
+            diff_now = smma20_history[-1] - smma120_history[-1]
+            diff_prev = smma20_history[-2] - smma120_history[-2]
+            # Speed/slope gap of crossing
+            slope_gap = abs(diff_now - diff_prev) / tick.ltp * 100 if tick.ltp > 0 else 0.05
             
-        # 2. SMMA Difference (Normalized distance between fast and slow averages)
-        smma20_history = indicators.calculate_smma(closes, 20)
-        smma20 = smma20_history[-1]
-        smma120 = smma120_history[-1]
+        # 2. LTQ metrics
+        a2, a5, ratio, side_share, max_ltq = feed.get_ltq_metrics(symbol)
         
-        if np.isnan(smma20) or np.isnan(smma120):
-            smma_diff = 0.05  # Fallback dummy value
-        else:
-            smma_diff = abs(smma20 - smma120) / tick.ltp * 100 # Percent of price
-
-        # 3. Price Volatility (Standard deviation of close prices over last 20 candles)
-        volatility = (np.std(closes[-20:]) / closes[-1]) * 100 # Normalized percentage
-
-        # 4. Volume Momentum (Last 5 mins volume vs. average of last 20 mins)
-        last_5_vol = sum(volumes[-5:])
-        avg_20_vol = sum(volumes[-20:]) / 4 # 20 candles / 4 = 5-candle volume equivalent
-        volume_ratio = (last_5_vol / max(1.0, avg_20_vol))
-
-        # 5. Order Book Imbalance (Bid Qty vs Ask Qty)
-        tot_bid = tick.total_bid_qty
-        tot_ask = tick.total_ask_qty
-        if tot_bid + tot_ask > 0:
-            bid_ask_imbalance = (tot_bid - tot_ask) / (tot_bid + tot_ask)
-        else:
-            bid_ask_imbalance = 0.0
-
-        # 6. Bid-Ask Spread
-        if tick.ltp > 0:
-            spread_pct = ((tick.ask_price - tick.bid_price) / tick.ltp) * 100
-        else:
-            spread_pct = 0.05
-
+        # 3. Time of day (minutes since open, assume 9:15 AM = 555 mins)
+        from datetime import datetime
+        now_dt = datetime.now()
+        current_mins = now_dt.hour * 60 + now_dt.minute
+        time_of_day = max(0, current_mins - 555)
+        
         return {
-            "trend_slope": float(trend_slope),
-            "smma_diff": float(smma_diff),
-            "volatility": float(volatility),
-            "volume_ratio": float(volume_ratio),
-            "bid_ask_imbalance": float(bid_ask_imbalance),
-            "spread_pct": float(spread_pct)
+            "A2": float(a2),
+            "A5": float(a5),
+            "ratio": float(ratio),
+            "side_share": float(side_share),
+            "max_ltq": float(max_ltq),
+            "slope_gap": float(slope_gap),
+            "time_of_day": float(time_of_day)
         }
 
     def predict(self, features: Dict[str, float], signal_type: str) -> Tuple[str, float, str]:
@@ -257,156 +188,222 @@ class CrossoverPredictor:
         Predicts if a crossover signal should be accepted or avoided.
         Returns: Tuple (Decision: "ACCEPT"/"AVOID", Success Probability: 0.0-100.0, Reason string)
         """
-        # Convert features dict to DataFrame to preserve feature names and avoid warnings
         x_df = pd.DataFrame([features], columns=self.features_columns)
         
         with self.lock:
-            # Predict probability of class 1 (Profitable)
             prob_profitable = self.model.predict_proba(x_df)[0][1]
             
         prob_pct = float(prob_profitable * 100)
         
-        # Make trading decision: Accept if confidence is >= 60%
-        decision = "ACCEPT" if prob_pct >= 60.0 else "AVOID"
-        
-        # Generate explanations for why a signal is bad (if avoided) or good (if accepted)
+        # Accept if confidence is >= ML_CONFIDENCE_THRESHOLD
+        decision = "ACCEPT" if prob_pct >= config.ML_CONFIDENCE_THRESHOLD else "AVOID"
         reason = self._generate_explanation(features, signal_type, decision, prob_pct)
         
         return decision, prob_pct, reason
 
     def _generate_explanation(self, features: Dict[str, float], signal_type: str, decision: str, prob: float) -> str:
-        """Translates the extracted features into plain-English decision reasoning."""
+        """Translates features into human-readable explanation."""
         reasons = []
+        ratio = features["ratio"]
+        side_share = features["side_share"]
+        slope_gap = features["slope_gap"]
         
-        slope = features["trend_slope"]
-        vol = features["volatility"]
-        v_ratio = features["volume_ratio"]
-        imbalance = features["bid_ask_imbalance"]
-        spread = features["spread_pct"]
-
         if decision == "AVOID":
-            # Identify which features violate standard trading principles
-            if signal_type == "BUY" and slope < -0.005:
-                reasons.append(f"Major Trend is DOWN (Slope: {slope:.3f}%), violating buy direction.")
-            elif signal_type == "SELL" and slope > 0.005:
-                reasons.append(f"Major Trend is UP (Slope: {slope:.3f}%), violating sell direction.")
-                
-            if vol < 0.04:
-                reasons.append(f"Extremely low Volatility ({vol:.2f}%), indicating sideways consolidation (high whipsaw risk).")
-            elif vol > 0.4:
-                reasons.append(f"High Volatility ({vol:.2f}%), signaling panic/exhaustion spikes.")
-                
-            if signal_type == "BUY" and imbalance < -0.15:
-                reasons.append(f"Heavy ask depth imbalance (Imbalance: {imbalance:.2f}) indicates strong resistance overhead.")
-            elif signal_type == "SELL" and imbalance > 0.15:
-                reasons.append(f"Heavy bid depth imbalance (Imbalance: {imbalance:.2f}) indicates strong support below.")
-                
-            if v_ratio < 0.8:
-                reasons.append(f"Weak trade volume momentum (Volume Ratio: {v_ratio:.2f}x), suggesting lack of institutional backing.")
-                
-            if spread > 0.10:
-                reasons.append(f"High Bid-Ask Spread ({spread:.2f}%), resulting in excessive slippage costs.")
+            if ratio < 1.0:
+                reasons.append(f"No volume burst (Ratio: {ratio:.2f}x < 1.0)")
+            if signal_type == "BUY" and side_share < 0.50:
+                reasons.append(f"Burst not buyer-side (Buy share: {side_share*100:.1f}% < 50%)")
+            elif signal_type == "SELL" and side_share > 0.50:
+                reasons.append(f"Burst not seller-side (Sell share: {(1-side_share)*100:.1f}% < 50%)")
+            if slope_gap < 0.10:
+                reasons.append(f"Weak/shallow crossover (Slope Gap: {slope_gap:.3f})")
                 
             if not reasons:
-                reasons.append(f"ML probability ({prob:.1f}%) is below the safety threshold of 60.0%.")
-                
+                reasons.append(f"Trade probability ({prob:.1f}%) is below acceptance threshold")
             return "Avoided: " + " | ".join(reasons)
         else:
-            # Positive confirmation details
             reasons.append("Supported by: ")
-            if signal_type == "BUY" and slope >= 0:
-                reasons.append("UP-Trend alignment")
-            elif signal_type == "SELL" and slope < 0:
-                reasons.append("DOWN-Trend alignment")
-                
-            if 0.05 <= vol <= 0.25:
-                reasons.append("healthy volatility")
-                
-            if v_ratio > 1.2:
-                reasons.append("strong volume momentum")
-                
-            if abs(imbalance) > 0.1:
-                reasons.append("supportive order book depth")
-                
-            return f"Accepted: Trade probability ({prob:.1f}%) is favorable. " + ", ".join(reasons) + "."
+            if ratio > 1.2:
+                reasons.append(f"strong volume burst ({ratio:.2f}x)")
+            if signal_type == "BUY" and side_share > 0.55:
+                reasons.append(f"buyer dominance ({side_share*100:.1f}%)")
+            elif signal_type == "SELL" and side_share < 0.45:
+                reasons.append(f"seller dominance ({(1-side_share)*100:.1f}%)")
+            if slope_gap > 0.15:
+                reasons.append("sharp crossover angle")
+            return f"Accepted: Probability ({prob:.1f}%) favorable. " + ", ".join(reasons) + "."
 
-    def record_new_crossover(self, symbol: str, signal_type: str, entry_price: float, timestamp: float, features: Dict[str, float]):
-        """Creates a TradeRecord to track crossover outcome in real time."""
-        with self.lock:
-            # Avoid duplicate active trade triggers on the same symbol/signal within 5 minutes
-            for t in self.active_trades:
-                if t.symbol == symbol and t.signal_type == signal_type and (timestamp - t.entry_time < 300):
-                    return
-            
-            trade = TradeRecord(symbol, signal_type, entry_price, timestamp, features)
-            self.active_trades.append(trade)
-            print(f"AI/ML: Started tracking {signal_type} trade for {symbol} at {entry_price}")
-
-    def update_active_trades(self, ticks: Dict[str, TickData], now: float):
-        """Ticks trade resolution monitoring and triggers online learning updates."""
-        resolved_trades = []
+    def handle_crossover(self, symbol: str, signal_type: str, price: float, timestamp: float, features: Dict[str, float]) -> Tuple[str, float, str]:
+        """
+        Handles entry and exit for both Unfiltered and ML Filtered portfolios.
+        Returns: decision, prob_pct, reason
+        """
+        # Run ML Prediction
+        decision, prob_pct, reason = self.predict(features, signal_type)
+        symbol_short = symbol.replace("NSE:", "").replace("-EQ", "")
         
+        print(f"\n[CROSSOVER DETECTED] {symbol_short} | Crossover: {signal_type} @ Price: ₹{price:.2f}")
+        print(f"  [FEATURES] LTQ Burst Ratio: {features['ratio']:.2f}x | Side Share: {features['side_share']*100:.1f}% | Slope Gap: {features['slope_gap']:.4f}")
+        print(f"  [ML GATEKEEPER] P(win): {prob_pct:.1f}% -> Decision: {decision}")
+        print(f"  [REASON] {reason}")
+
         with self.lock:
-            for trade in self.active_trades:
-                tick = ticks.get(trade.symbol)
-                if not tick or tick.ltp == 0.0:
-                    continue
+            # 1. Unfiltered Portfolio Processing
+            if symbol in self.active_unfiltered:
+                prev_trade = self.active_unfiltered[symbol]
+                prev_trade.exit_trade(price, timestamp)
+                self.unfiltered_trades.append(prev_trade)
+                self.active_unfiltered.pop(symbol)
+                print(f"  [PORTFOLIO: UNFILTERED] Exited previous {prev_trade.signal_type} trade. Entry: ₹{prev_trade.entry_price:.2f} -> Exit: ₹{price:.2f} | P&L: ₹{prev_trade.pnl:.2f} ({prev_trade.pnl_pct:+.2f}%)")
+                self.log_trade_to_csv(prev_trade, "UNFILTERED")
                 
-                # Check for candle update to increment holding time
-                # Simple approximation: increment candles_held if time elapsed is ~1 minute
-                elapsed_min = int((now - trade.entry_time) / 60)
-                trade.candles_held = elapsed_min
+            # Open new Unfiltered trade
+            unf_trade = TradeRecord(symbol, signal_type, price, timestamp, features)
+            self.active_unfiltered[symbol] = unf_trade
+            print(f"  [PORTFOLIO: UNFILTERED] Entered new {signal_type} position.")
+            
+            # 2. ML Filtered Portfolio Processing
+            # Crossover exits the previous trade regardless of whether the new signal is accepted or skipped.
+            # If the new signal is avoided, the portfolio stays flat.
+            if symbol in self.active_filtered:
+                prev_trade = self.active_filtered[symbol]
+                prev_trade.exit_trade(price, timestamp)
+                self.filtered_trades.append(prev_trade)
+                self.active_filtered.pop(symbol)
+                print(f"  [PORTFOLIO: ML FILTERED] Exited previous {prev_trade.signal_type} trade. Entry: ₹{prev_trade.entry_price:.2f} -> Exit: ₹{price:.2f} | P&L: ₹{prev_trade.pnl:.2f} ({prev_trade.pnl_pct:+.2f}%)")
+                self.log_trade_to_csv(prev_trade, "ML FILTERED")
                 
-                resolved = trade.update(tick.ltp, now)
-                if resolved:
-                    resolved_trades.append(trade)
-                    
-            # Remove resolved trades from active queue
-            for trade in resolved_trades:
-                self.active_trades.remove(trade)
-                self.completed_trades.append(trade)
+            # If accepted, open new trade in Filtered portfolio
+            if decision == "ACCEPT":
+                filt_trade = TradeRecord(symbol, signal_type, price, timestamp, features)
+                self.active_filtered[symbol] = filt_trade
+                print(f"  [PORTFOLIO: ML FILTERED] Accepted signal. Entered new {signal_type} position.")
+            else:
+                print(f"  [PORTFOLIO: ML FILTERED] Avoided signal. Staying FLAT.")
                 
-        # Train model online on newly resolved trade data points
-        if resolved_trades:
-            self._retrain_model_online(resolved_trades)
+        # Trigger online retraining when an unfiltered trade completes
+        if symbol in self.active_unfiltered:
+            # Retrain on the last completed unfiltered trade (if any)
+            completed_list = [t for t in self.unfiltered_trades if t.symbol == symbol]
+            if completed_list:
+                self._retrain_model_online([completed_list[-1]])
+                
+        # Print current backtest report summary
+        report = self.get_backtest_report()
+        unf_rep = report["unfiltered"]
+        filt_rep = report["filtered"]
+        print(f"  [SESSION REPORT SUMMARY]")
+        print(f"    - Unfiltered Portfolio: {unf_rep['trades']} trades | Net P&L: ₹{unf_rep['net_pnl']:.2f} | WinRate: {unf_rep['win_rate']:.1f}% | MaxDD: ₹{unf_rep['max_dd']:.2f}")
+        print(f"    - ML Filtered Portfolio: {filt_rep['trades']} trades | Net P&L: ₹{filt_rep['net_pnl']:.2f} | WinRate: {filt_rep['win_rate']:.1f}% | MaxDD: ₹{filt_rep['max_dd']:.2f}\n")
+                
+        # Save backtest report to CSV (Deliverable #6)
+        self.save_backtest_report_csv()
+
+        return decision, prob_pct, reason
+
+    def log_trade_to_csv(self, trade: TradeRecord, portfolio: str):
+        """Logs a completed trade record to a CSV file (Deliverable #3)."""
+        try:
+            log_file = "trade_history_log.csv"
+            import os
+            write_header = not os.path.exists(log_file)
+            with open(log_file, "a") as f:
+                if write_header:
+                    f.write("symbol,portfolio,direction,entry_time,entry_price,exit_time,exit_price,pnl,pnl_pct,status\n")
+                
+                from datetime import datetime
+                entry_dt = datetime.fromtimestamp(trade.entry_time).strftime("%Y-%m-%d %H:%M:%S")
+                exit_dt = datetime.fromtimestamp(trade.exit_time).strftime("%Y-%m-%d %H:%M:%S")
+                
+                f.write(f"{trade.symbol},{portfolio},{trade.signal_type},{entry_dt},{trade.entry_price:.2f},{exit_dt},{trade.exit_price:.2f},{trade.pnl:.4f},{trade.pnl_pct:.2f}%,{trade.status}\n")
+        except Exception as e:
+            print(f"Error writing trade log: {e}")
+
+    def save_backtest_report_csv(self):
+        """Saves the cumulative backtest comparison report to a CSV file (Deliverable #6)."""
+        try:
+            report = self.get_backtest_report()
+            unf = report["unfiltered"]
+            filt = report["filtered"]
+            
+            with open("backtest_report_log.csv", "w") as f:
+                f.write("Metric,Unfiltered Portfolio,ML Filtered Portfolio\n")
+                f.write(f"Total Trades,{unf['trades']},{filt['trades']}\n")
+                f.write(f"Win Rate %,{unf['win_rate']:.2f}%,{filt['win_rate']:.2f}%\n")
+                f.write(f"Net P&L (Points/Rs),{unf['net_pnl']:.4f},{filt['net_pnl']:.4f}\n")
+                f.write(f"Max Drawdown (Points/Rs),{unf['max_dd']:.4f},{filt['max_dd']:.4f}\n")
+        except Exception as e:
+            print(f"Error writing backtest report: {e}")
+
+    def update_active_trades(self, ticks: Dict[str, Any], now: float):
+        """Updates prices of active trades in both portfolios."""
+        with self.lock:
+            for symbol, trade in list(self.active_unfiltered.items()):
+                tick = ticks.get(symbol)
+                if tick and tick.ltp > 0:
+                    trade.update(tick.ltp, now)
+            for symbol, trade in list(self.active_filtered.items()):
+                tick = ticks.get(symbol)
+                if tick and tick.ltp > 0:
+                    trade.update(tick.ltp, now)
 
     def _retrain_model_online(self, resolved_trades: List[TradeRecord]):
-        """Performs incremental training of the Random Forest model as outcomes resolve."""
-        print(f"Online Learning: Retraining AI/ML model with {len(resolved_trades)} new trade outcomes...")
+        """Performs incremental training of the model."""
         with self.lock:
             for trade in resolved_trades:
                 features_list = [trade.features[col] for col in self.features_columns]
                 outcome = 1 if trade.status == "WIN" else 0
-                
                 self.X_train.append(features_list)
                 self.y_train.append(outcome)
-                
-            # Retrain classifier
+            
+            # Re-fit
             try:
-                # Scikit-learn RandomForest does not support incremental partial_fit,
-                # but since we store session training samples, we re-fit the dataset.
-                # Re-fitting is fast (fractions of a millisecond) for thousands of samples.
                 self.model.fit(np.array(self.X_train), np.array(self.y_train))
-                print(f"Model successfully updated. Total training samples: {len(self.y_train)}")
             except Exception as e:
                 print(f"Error during online retraining: {e}")
 
-    def get_model_accuracy(self) -> float:
-        """Returns the accuracy/win-rate of signals processed in this session."""
+    def get_backtest_report(self) -> Dict[str, Dict[str, Any]]:
+        """Returns side-by-side performance metrics for Unfiltered vs ML Filtered portfolios."""
         with self.lock:
-            total_resolved = len(self.completed_trades)
-            if total_resolved == 0:
-                # Return default synthetic accuracy rate (~68%)
-                return 68.5
+            unf_comp = list(self.unfiltered_trades)
+            filt_comp = list(self.filtered_trades)
             
-            wins = sum(1 for t in self.completed_trades if t.status == "WIN")
-            return (wins / total_resolved) * 100
+        def analyze(trades: List[TradeRecord]) -> Dict[str, Any]:
+            total = len(trades)
+            if total == 0:
+                return {"trades": 0, "win_rate": 0.0, "net_pnl": 0.0, "max_dd": 0.0}
+            
+            wins = sum(1 for t in trades if t.status == "WIN")
+            win_rate = (wins / total) * 100
+            net_pnl = sum(t.pnl for t in trades)
+            
+            # Drawdown
+            equity = 0.0
+            peak = 0.0
+            max_dd = 0.0
+            # Sort by exit time to build equity curve
+            sorted_trades = sorted(trades, key=lambda t: t.exit_time)
+            for t in sorted_trades:
+                equity += t.pnl
+                peak = max(peak, equity)
+                dd = peak - equity
+                max_dd = max(max_dd, dd)
+                
+            return {
+                "trades": total,
+                "win_rate": win_rate,
+                "net_pnl": net_pnl,
+                "max_dd": max_dd
+            }
+            
+        return {
+            "unfiltered": analyze(unf_comp),
+            "filtered": analyze(filt_comp)
+        }
 
     def get_feature_importances(self) -> Dict[str, float]:
-        """Returns the relative importance percentage of each feature in the Random Forest model."""
         with self.lock:
             importances = self.model.feature_importances_
-            
         result = {}
         for col, imp in zip(self.features_columns, importances):
             result[col] = float(imp * 100)

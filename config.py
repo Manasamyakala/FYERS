@@ -11,10 +11,8 @@ SMMA_FAST_PERIOD = 20
 SMMA_SLOW_PERIOD = 120
 TIMEFRAME = "1"  # 1-minute timeframe
 
-# AI/ML Trade Profitability Parameters
-TAKE_PROFIT_PCT = 0.5  # 0.5% target profit
-STOP_LOSS_PCT = 0.3    # 0.3% stop loss
-MAX_TRADE_HOLD_CANDLES = 30  # Max 30 minutes to evaluate trade outcome
+# AI/ML Trade Acceptance Threshold
+ML_CONFIDENCE_THRESHOLD = 55.0  # Accept trade if P(win) >= 55%
 
 # Curated pool of NSE stocks for scanning
 # Includes stocks within the price range, outside the price range,
