@@ -111,7 +111,7 @@ Each row represents one stock and includes:
 
 ---
 
-#  AI / Machine Learning Analysis
+#   Machine Learning Analysis
 
 The major objective of this project is **not simply generating crossover signals**, but determining whether those signals should actually be traded.
 
@@ -160,19 +160,6 @@ Generated when:
 ```
 SMMA (20) crosses below SMMA (120)
 ```
-
-The AI evaluates whether the bearish crossover is likely to continue.
-
----
-
-## AI Decision Output
-
-Instead of simply displaying:
-
-```
-BUY
-```
-
 the application displays something similar to:
 
 | Signal | Confidence | Decision |
@@ -194,7 +181,7 @@ If the AI predicts a poor-quality signal, the dashboard provides an explanation 
 - High volatility
 - Fake breakout
 - Insufficient momentum
-- Bid/Ask imbalance
+- Bid imbalance
 - Low confidence prediction
 
 Example:
@@ -268,7 +255,7 @@ This enables:
 - Dynamic market depth visualization
 
 ---
-# ⚙ Installation
+#  Installation
 
 ```bash
 git clone https://github.com/manasamyakala/FYER.git
