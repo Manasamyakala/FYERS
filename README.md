@@ -1,4 +1,4 @@
-#  AI/ML-Based Stock Market Screening and Analysis System
+#  Stock Market Screening and Analysis System
 
 ##  Overview
 
