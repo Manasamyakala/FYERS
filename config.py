@@ -1,6 +1,5 @@
 # config.py
 # Configuration settings for the Stock Screening and Analysis System
-
 # Screening & Liquidity Parameters
 PRICE_MIN = 30.0
 PRICE_MAX = 500.0
