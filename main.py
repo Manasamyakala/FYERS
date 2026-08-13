@@ -6,7 +6,6 @@ import threading
 from typing import Dict, List, Any, Optional
 import numpy as np
 import customtkinter as ctk
-
 import config
 import indicators
 from fyers_apiv3 import fyersModel
